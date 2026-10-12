@@ -4,7 +4,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.engine import COLS, allocate, monthly_returns, optimize, update_prices
+from src.engine import (
+    COLS,
+    allocate,
+    fundamental_score,
+    monthly_returns,
+    optimize,
+    risk_contributions,
+    update_prices,
+)
 
 
 def price_frame(ticker: str, dates: list[str], prices: list[float]) -> pd.DataFrame:
@@ -73,4 +81,39 @@ def test_optimize_and_allocate_respect_asset_and_segment_caps():
     assert weights.groupby(pd.Series(segments)).sum().max() <= 0.60 + 1e-7
     assert summary["invested"] + summary["cash"] <= 10_000 + 1e-8
     assert plan["invested"].max() <= 3_000 + 0.01
+
+
+def test_fundamental_score_is_relative_and_requires_three_components():
+    ratios = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "C"],
+            "period": ["2025-12-31"] * 3,
+            "roe": [0.20, 0.10, np.nan],
+            "roa_ebit": [0.14, 0.07, np.nan],
+            "gaf": [1.10, 2.50, 1.00],
+            "gao": [1.05, 3.00, np.nan],
+            "ki": [0.04, np.nan, np.nan],
+            "ki_interest_proxy": [0.05, 0.12, np.nan],
+        }
+    )
+
+    scores = fundamental_score(ratios, ["A", "B", "C", "D"], min_components=3).set_index("ticker")
+
+    assert scores.loc["A", "fundamental_score"] > scores.loc["B", "fundamental_score"]
+    assert scores.loc["A", "ki_effective"] == pytest.approx(0.04)
+    assert scores.loc["B", "ki_effective"] == pytest.approx(0.12)
+    assert np.isnan(scores.loc["C", "fundamental_score"])
+    assert scores.loc["D", "fundamental_coverage"] == 0
+
+
+def test_risk_contributions_reconcile_to_total_volatility():
+    names = ["A", "B"]
+    weights = pd.Series([0.60, 0.40], index=names)
+    cov = pd.DataFrame([[0.04, 0.01], [0.01, 0.09]], index=names, columns=names)
+
+    risk = risk_contributions(weights, cov)
+
+    assert risk["risk_contribution_pct"].sum() == pytest.approx(1.0)
+    portfolio_volatility = np.sqrt(weights.to_numpy() @ cov.to_numpy() @ weights.to_numpy())
+    assert risk["component_risk_month"].sum() == pytest.approx(portfolio_volatility)
 

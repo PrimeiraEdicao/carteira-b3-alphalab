@@ -12,8 +12,14 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src.engine import save_csv, save_result
-from src.universe_b3 import refresh_catalog, refresh_history, run_b3
+from src.engine import (
+    fundamental_ratios,
+    fundamental_score,
+    save_csv,
+    save_result,
+    update_fundamentals,
+)
+from src.universe_b3 import refresh_catalog, refresh_history, run_b3, screen_assets
 
 
 ROOT = Path(__file__).resolve().parent
@@ -150,9 +156,21 @@ with st.sidebar:
     with st.expander("Premissas avançadas"):
         ranking = st.selectbox(
             "Seleção automática",
-            ["liquidity", "sharpe", "volatility"],
-            format_func={"liquidity": "Maior liquidez", "sharpe": "Maior Sharpe histórico", "volatility": "Menor volatilidade"}.get,
+            ["liquidity", "sharpe", "volatility", "fundamental"],
+            format_func={"liquidity": "Maior liquidez", "sharpe": "Maior Sharpe histórico",
+                         "volatility": "Menor volatilidade", "fundamental": "Qualidade fundamentalista"}.get,
         )
+        default_pool = min(60, max(20, 3 * max_assets))
+        fundamental_pool_size = st.slider(
+            "Pool para análise fundamentalista",
+            min_value=max_assets,
+            max_value=60,
+            value=max(max_assets, default_pool),
+            disabled=ranking != "fundamental",
+            help="Pré-seleção por liquidez antes da consulta das demonstrações anuais.",
+        )
+        if ranking == "fundamental":
+            st.caption("Score relativo: ROE, ROA-EBIT, Ki, estabilidade do GAF e do GAO; 20% cada e cobertura mínima 3/5.")
         objective = st.selectbox(
             "Otimização dos pesos",
             ["min_variance", "max_sharpe"],
@@ -187,6 +205,7 @@ if run:
         "max_segment": max_group,
         "group_column": group_column,
         "ranking": ranking,
+        "fundamental_pool_size": fundamental_pool_size,
         "objective": objective,
         "one_per_prefix": one_per_prefix,
         "allow_partial": allow_partial,
@@ -221,6 +240,26 @@ if run:
             raise RuntimeError(
                 "A fonte aplicou limite de consultas. O histórico foi preservado; aguarde e execute novamente para retomar."
             )
+        scores = None
+        if ranking == "fundamental":
+            progress.progress(0.95, text="Definindo o pool fundamentalista por liquidez…")
+            preliminary, _, _ = screen_assets(
+                history, scope, logs, window, min_liquidity,
+                allow_partial=allow_partial, one_per_prefix=one_per_prefix,
+                capital=capital, lot=lot, max_asset=max_asset,
+                ranking="liquidity", rf_annual=rf_annual,
+            )
+            pool = preliminary.head(fundamental_pool_size)
+            if pool.empty:
+                raise ValueError("Nenhum ativo elegível para a análise fundamentalista")
+            progress.progress(0.97, text=f"Consultando fundamentos de {len(pool)} candidatos…")
+            raw_fundamentals, fundamental_errors = update_fundamentals(
+                DATA_DIR / "fundamentais.csv", pool["ticker"].tolist()
+            )
+            ratios = fundamental_ratios(raw_fundamentals)
+            scores = fundamental_score(ratios, pool["ticker"].tolist(), min_components=3)
+            save_csv(scores, destination / "scores_fundamentalistas.csv")
+            save_csv(fundamental_errors, destination / "diagnostico_fundamentos.csv")
         result = run_b3(
             history,
             scope,
@@ -242,6 +281,7 @@ if run:
             fixed_fee=fixed_fee,
             group_column=group_column,
             diagnostic_folder=destination,
+            fundamental_scores=scores,
         )
         save_result(result, destination)
         save_csv(result["selected"], destination / "ativos_selecionados.csv")
@@ -276,9 +316,29 @@ if result is not None and folder_value:
         )
         st.bar_chart(plan.set_index("ticker")[["peso_teorico_%", "peso_efetivo_%"]])
     with tab2:
-        left, right = st.columns(2)
+        left, center, right = st.columns(3)
         left.metric("Retorno mensal estimado", f"{100 * summary['expected_month']:.2f}%")
-        right.metric("Volatilidade mensal", f"{100 * summary['volatility_month']:.2f}%")
+        center.metric("Volatilidade mensal", f"{100 * summary['volatility_month']:.2f}%")
+        right.metric("Sharpe mensal estimado", f"{summary['sharpe_month']:.3f}")
+        risk_table = plan[["ticker", "alpha_month", "beta", "r_squared", "beta_pvalue",
+                           "beta_stderr", "historical_mean_month", "expected_month",
+                           "volatility_month", "historical_sharpe_month",
+                           "risk_contribution_pct"]].copy()
+        for column in ["alpha_month", "historical_mean_month", "expected_month",
+                       "volatility_month", "risk_contribution_pct"]:
+            risk_table[column] *= 100
+        risk_table = risk_table.rename(columns={
+            "alpha_month": "alpha_mensal_%", "beta": "beta", "r_squared": "r_quadrado",
+            "beta_pvalue": "p_valor_beta", "beta_stderr": "erro_padrao_beta",
+            "historical_mean_month": "media_historica_mensal_%",
+            "expected_month": "retorno_estimado_mensal_%",
+            "volatility_month": "volatilidade_mensal_%",
+            "historical_sharpe_month": "sharpe_historico_mensal",
+            "risk_contribution_pct": "contribuicao_risco_%",
+        })
+        st.dataframe(risk_table, use_container_width=True, hide_index=True)
+        st.caption("Contribuição de risco calculada com os pesos teóricos; pode ser negativa quando um ativo reduz o risco conjunto.")
+        st.bar_chart(risk_table.set_index("ticker")[["contribuicao_risco_%"]])
         monte_carlo = result["monte_carlo"]
         if not monte_carlo.empty:
             chart = monte_carlo[["volatility_month", "expected_month", "sharpe_month"]].copy()
@@ -297,6 +357,27 @@ if result is not None and folder_value:
         excluded = result["screening"].loc[lambda frame: ~frame["eligible"]]
         with st.expander(f"Ativos excluídos ({len(excluded)})"):
             st.dataframe(excluded[["ticker", "name", "exclusion"]], use_container_width=True, hide_index=True)
+
+        if summary["ranking"] == "fundamental":
+            st.info("O score fundamentalista é relativo ao pool pré-selecionado por liquidez e não constitui previsão de retorno.")
+            fundamental_columns = [c for c in ["ticker", "period", "roe", "roa_ebit", "gaf", "gao",
+                                                "ki_effective", "fundamental_coverage", "fundamental_score"]
+                                   if c in result["eligible"]]
+            st.dataframe(result["eligible"][fundamental_columns], use_container_width=True, hide_index=True)
+
+    with st.expander("Metodologia das métricas"):
+        st.markdown(
+            """
+            **Mercado:** retornos mensais ajustados; regressão `ação = alpha + beta × Ibovespa`;
+            risco pela matriz de covariância; pesos por variância mínima ou Sharpe máximo.
+
+            **Contribuição de risco:** `peso × risco marginal / volatilidade da carteira`.
+
+            **Fundamentos:** percentis transversais com pesos iguais para ROE, ROA-EBIT, menor Ki,
+            GAF próximo de 1 e GAO próximo de 1. O cálculo exige ao menos três componentes e usa Ki
+            revisado quando disponível; caso contrário, usa despesa de juros/dívida total como proxy.
+            """
+        )
 
     st.download_button(
         "Baixar execução completa (.zip)",

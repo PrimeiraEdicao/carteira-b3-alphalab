@@ -117,17 +117,21 @@ def monthly_returns(history, tickers, window=24, asof=None):
     if not np.isfinite(r.to_numpy()).all(): raise ValueError('Retornos não finitos')
     return r
 
-def fit_model(returns, benchmark='^BVSP', market_scenario=None):
+def fit_model(returns, benchmark='^BVSP', market_scenario=None, rf_annual=.10):
     x = returns[benchmark].to_numpy()
     if np.var(x) <= 1e-15: raise ValueError('Benchmark sem variância')
     scenario = float(x.mean() if market_scenario is None else market_scenario)
+    rf_month = (1 + rf_annual)**(1/12) - 1
     rows = []
     for ticker in returns.columns.drop(benchmark):
         y = returns[ticker].to_numpy(); f = linregress(x, y)
+        volatility = y.std(ddof=1)
         rows.append(dict(ticker=ticker, alpha_month=f.intercept, beta=f.slope,
             r_squared=f.rvalue**2, beta_pvalue=f.pvalue, beta_stderr=f.stderr,
             expected_month=f.intercept + f.slope*scenario,
-            historical_mean_month=y.mean(), volatility_month=y.std(ddof=1), observations=len(y)))
+            historical_mean_month=y.mean(), volatility_month=volatility,
+            historical_sharpe_month=(y.mean()-rf_month)/volatility,
+            observations=len(y)))
     stats = pd.DataFrame(rows).set_index('ticker')
     cov = returns[stats.index].cov(ddof=1)
     return stats, cov, scenario
@@ -180,6 +184,18 @@ def monte_carlo(stats, cov, segments, count=10000, seed=42, max_asset=1., max_se
     out['sharpe_month']=(ret-((1+rf_annual)**(1/12)-1))/np.maximum(vol,1e-12)
     return out
 
+def risk_contributions(weights, cov):
+    """Contribuições marginais e componentes para a volatilidade mensal."""
+    names=list(weights.index)
+    w=weights.to_numpy(dtype=float);sigma=cov.loc[names,names].to_numpy(dtype=float)
+    variance=float(w@sigma@w)
+    if not np.isfinite(variance) or variance<=1e-16:
+        raise ValueError('Variância da carteira inválida para decomposição de risco')
+    volatility=float(np.sqrt(variance));marginal=(sigma@w)/volatility
+    component=w*marginal
+    return pd.DataFrame({'ticker':names,'marginal_risk_month':marginal,
+        'component_risk_month':component,'risk_contribution_pct':component/volatility})
+
 def allocate(weights, prices, budget, segments, max_asset=1., max_segment=1., lot=1, fee_rate=0., fixed_fee=0.):
     """MILP: minimiza desvio L1 em reais mais caixa. Quantidades inteiras.
     Limites monetários aplicados ao capital informado, inclusive após arredondamento.
@@ -225,7 +241,7 @@ def allocate(weights, prices, budget, segments, max_asset=1., max_segment=1., lo
                  mip_gap=float(getattr(z,'mip_gap',np.nan)))
     return out,summary
 
-def update_fundamentals(path, tickers, loader=None):
+def update_fundamentals(path, tickers, loader=None, cache_days=7):
     """Demonstrações anuais públicas Yahoo: atualização por ticker/exercício.
     Ausências são NaN, nunca zero. ROA segue EBIT/Ativo da planilha.
     Ki exato exige despesa financeira total e dívida onerosa revisadas manualmente.
@@ -236,8 +252,15 @@ def update_fundamentals(path, tickers, loader=None):
             obj=yf.Ticker(t)
             return obj.get_income_stmt(freq='yearly'),obj.get_balance_sheet(freq='yearly')
     path=Path(path); old=pd.read_csv(path) if path.exists() else pd.DataFrame()
+    cached=set()
+    if not old.empty and 'fetched_at' in old:
+        fetched=pd.to_datetime(old.fetched_at,utc=True,errors='coerce')
+        cutoff=pd.Timestamp.now(tz='UTC')-pd.Timedelta(days=cache_days)
+        cached=set(old.loc[fetched.ge(cutoff),'ticker'])
     rows=[]; errors=[]
     for t in tickers:
+        if t in cached:
+            continue
         try:
             inc, bal=loader(t)
             if inc.empty or bal.empty: raise ValueError('Demonstração anual indisponível')
@@ -275,6 +298,39 @@ def fundamental_ratios(raw):
     d['ki_interest_proxy']=ratio(d.interest_expense_proxy.abs(),d.total_debt_proxy)
     return d.replace([np.inf,-np.inf],np.nan)
 
+def fundamental_score(ratios, tickers=None, min_components=3):
+    """Score transversal, explícito e relativo ao pool consultado.
+
+    ROE/ROA maiores recebem percentil maior. Ki menor e GAF/GAO mais próximos
+    de 1 recebem percentil maior. Cada componente vale 20%; pesos disponíveis
+    são renormalizados e menos de ``min_components`` invalida o score.
+    """
+    if min_components < 1 or min_components > 5:
+        raise ValueError('Cobertura fundamental deve estar entre 1 e 5')
+    requested=list(dict.fromkeys(tickers or ratios.get('ticker',pd.Series(dtype=str)).tolist()))
+    if ratios.empty:
+        return pd.DataFrame({'ticker':requested,'fundamental_coverage':0,
+            'fundamental_score':np.nan})
+    d=ratios.copy();d['period']=pd.to_datetime(d.period,errors='coerce')
+    latest=(d.sort_values(['ticker','period']).groupby('ticker',as_index=False).tail(1)
+              .set_index('ticker'))
+    if requested:
+        latest=latest.reindex(requested)
+    latest['ki_effective']=latest['ki'].combine_first(latest['ki_interest_proxy'])
+    raw_components=pd.DataFrame(index=latest.index)
+    raw_components['roe_score']=latest['roe'].rank(pct=True,method='average')
+    raw_components['roa_score']=latest['roa_ebit'].rank(pct=True,method='average')
+    raw_components['ki_score']=(-latest['ki_effective']).rank(pct=True,method='average')
+    raw_components['gaf_stability_score']=(-(latest['gaf']-1).abs()).rank(pct=True,method='average')
+    raw_components['gao_stability_score']=(-(latest['gao']-1).abs()).rank(pct=True,method='average')
+    coverage=raw_components.notna().sum(axis=1)
+    score=raw_components.mean(axis=1,skipna=True).where(coverage.ge(min_components))
+    columns=['period','roe','roa_ebit','gaf','gao','ki','ki_interest_proxy','ki_effective']
+    out=latest.reindex(columns=columns).join(raw_components)
+    out['fundamental_coverage']=coverage
+    out['fundamental_score']=score
+    return out.reset_index().rename(columns={'index':'ticker'})
+
 def apply_fundamental_overrides(raw, manual):
     required={'ticker','period'}
     if not required.issubset(manual.columns): raise ValueError('Revisão precisa de ticker e period')
@@ -297,7 +353,7 @@ def run_portfolio(history, universe, capital, window=24, objective='min_variance
     names=universe.ticker.tolist(); segments=universe.set_index('ticker').segment.to_dict()
     if len(names)!=len(set(names)) or not names: raise ValueError('Universo vazio ou duplicado')
     r=monthly_returns(history,names+['^BVSP'],window,asof)
-    stats,cov,scenario=fit_model(r,market_scenario=market_scenario)
+    stats,cov,scenario=fit_model(r,market_scenario=market_scenario,rf_annual=rf_annual)
     weights=optimize(stats,cov,segments,objective,max_asset,max_segment,rf_annual)
     current=history[history.ticker.isin(names)].sort_values('date').groupby('ticker').tail(1).set_index('ticker')
     # Todas as ações devem ter a mesma data do benchmark mais recente retornado.
@@ -309,10 +365,15 @@ def run_portfolio(history, universe, capital, window=24, objective='min_variance
     plan,summary=allocate(weights,current.close,capital,segments,max_asset,max_segment,lot,fee_rate,fixed_fee)
     plan=plan.merge(stats.reset_index(),on='ticker');plan['quote_date']=plan.ticker.map(current.date)
     w=weights.to_numpy();sigma=cov.to_numpy();mu=stats.expected_month.to_numpy()
-    summary.update(expected_month=float(w@mu),volatility_month=float(np.sqrt(w@sigma@w)),
-        variance_month=float(w@sigma@w),annualized_volatility=float(np.sqrt(12*w@sigma@w)),
+    portfolio_variance=float(w@sigma@w)
+    portfolio_volatility=float(np.sqrt(portfolio_variance))
+    risk=risk_contributions(weights,cov)
+    plan=plan.merge(risk,on='ticker',how='left')
+    summary.update(expected_month=float(w@mu),volatility_month=portfolio_volatility,
+        variance_month=portfolio_variance,annualized_volatility=float(np.sqrt(12*portfolio_variance)),
         market_scenario_month=scenario,window_months=window,first_month=str(r.index.min()),last_month=str(r.index.max()),
         objective=objective,quote_date=str(bench),rf_annual=rf_annual)
+    summary['sharpe_month']=(summary['expected_month']-((1+rf_annual)**(1/12)-1))/portfolio_volatility
     actual=plan.set_index('ticker').actual_weight_capital.reindex(weights.index).to_numpy()
     summary['rounded_risky_expected_month']=float(actual@mu)
     summary['rounded_risky_volatility_month']=float(np.sqrt(actual@sigma@actual))
