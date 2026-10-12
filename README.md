@@ -17,6 +17,8 @@ projetos: azul-marinho `#0F2D5B`, azul `#315FC3`, destaque `#4F8CFF` e fundo `#F
 - filtra por liquidez, cobertura, preço recente, setor e segmento;
 - seleciona candidatos por ranking com verificação de viabilidade por MILP;
 - otimiza pesos por variância mínima ou Sharpe estimado;
+- expõe alpha, beta, R², significância, Sharpe e contribuição de cada ativo ao risco;
+- oferece ranking fundamentalista opcional por ROE, ROA-EBIT, Ki, GAF e GAO;
 - converte pesos em quantidades inteiras, respeitando capital e limites por ativo/grupo;
 - salva configuração, diagnósticos, triagem, carteira, estatísticas e resumo da execução.
 
@@ -34,6 +36,11 @@ No Windows PowerShell, ative o ambiente com `.venv\Scripts\Activate.ps1`.
 Na primeira abertura, clique em **Atualizar catálogo público**. Depois selecione o escopo, informe
 o capital e execute a montagem. Consultar centenas de ativos pode demorar e provocar limitação da
 fonte; o checkpoint permite retomar sem perder as séries já salvas.
+
+O ranking padrão continua sendo **maior liquidez**. O ranking **qualidade fundamentalista** primeiro
+forma um pool configurável de ativos líquidos e então calcula um score transversal com pesos iguais
+para ROE, ROA-EBIT, menor Ki, GAF próximo de 1 e GAO próximo de 1. São exigidos ao menos três dos
+cinco componentes. O score é relativo ao pool e não é uma previsão de retorno.
 
 ## Usar no Colab
 
@@ -81,5 +88,9 @@ O universo corresponde ao catálogo entregue pelo provedor e não é uma certifi
 oficiais da B3. Dados públicos podem conter atraso, omissões e revisões. A seleção por ranking seguida
 da otimização de pesos não certifica o ótimo global entre todas as combinações nem prevê retorno
 futuro. Este software não envia ordens e não constitui recomendação de investimento.
+
+As demonstrações anuais públicas não carregam, neste fluxo, a data histórica de publicação. Assim,
+o ranking fundamentalista pode ser usado na fotografia corrente, mas não deve ser tratado como
+backtest causal sem adicionar o campo de disponibilidade de cada demonstração.
 
 Não há licença de reutilização concedida neste repositório público.
