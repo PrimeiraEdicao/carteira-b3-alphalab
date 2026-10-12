@@ -223,10 +223,33 @@ def select_ranked(eligible,max_assets=10,max_asset=.25,max_segment=.5,group_colu
 def run_b3(history,universe,log,capital,window=24,min_liquidity=1e6,max_assets=10,
            max_asset=.25,max_segment=.5,ranking='liquidity',one_per_prefix=True,
            allow_partial=True,objective='min_variance',rf_annual=.10,market_scenario=None,
-           lot=1,fee_rate=0.,fixed_fee=0.,asof=None,simulations=10000,group_column='segment',diagnostic_folder=None):
+           lot=1,fee_rate=0.,fixed_fee=0.,asof=None,simulations=10000,group_column='segment',
+           diagnostic_folder=None,fundamental_scores=None):
+    market_ranking='liquidity' if ranking=='fundamental' else ranking
     elig,report,_=screen_assets(history,universe,log,window,min_liquidity,
          allow_partial=allow_partial,one_per_prefix=one_per_prefix,capital=capital,
-         lot=lot,max_asset=max_asset,asof=asof,ranking=ranking,rf_annual=rf_annual)
+         lot=lot,max_asset=max_asset,asof=asof,ranking=market_ranking,rf_annual=rf_annual)
+    if ranking=='fundamental':
+        if fundamental_scores is None or fundamental_scores.empty:
+            raise ValueError('Ranking fundamentalista requer fundamentos do pool de candidatos')
+        fields=['ticker','period','roe','roa_ebit','gaf','gao','ki_effective',
+                'fundamental_coverage','fundamental_score']
+        available=[c for c in fields if c in fundamental_scores]
+        scores=fundamental_scores[available].drop_duplicates('ticker',keep='last')
+        pool=set(scores.ticker)
+        elig=elig.merge(scores,on='ticker',how='left')
+        insufficient=elig.fundamental_score.isna()
+        outside=~elig.ticker.isin(pool)
+        report=report.merge(scores,on='ticker',how='left')
+        report.loc[report.ticker.isin(elig.loc[insufficient & ~outside,'ticker']),'eligible']=False
+        report.loc[report.ticker.isin(elig.loc[insufficient & ~outside,'ticker']),'exclusion']='Fundamentos insuficientes: menos de 3 dos 5 componentes'
+        report.loc[report.ticker.isin(elig.loc[outside,'ticker']),'eligible']=False
+        report.loc[report.ticker.isin(elig.loc[outside,'ticker']),'exclusion']='Fora do pool fundamentalista pré-ordenado por liquidez'
+        elig=(elig.loc[~insufficient].sort_values(['fundamental_score','ticker'],ascending=[False,True])
+              .reset_index(drop=True))
+        elig['rank']=np.arange(1,len(elig)+1)
+        if elig.empty:
+            raise ValueError('Nenhum ativo possui cobertura fundamental suficiente no pool consultado')
     if diagnostic_folder is not None:
         save_csv(report,Path(diagnostic_folder)/'triagem.csv')
         save_csv(elig,Path(diagnostic_folder)/'ranking_elegiveis.csv')
@@ -240,5 +263,7 @@ def run_b3(history,universe,log,capital,window=24,min_liquidity=1e6,max_assets=1
         bought_count=int((result['plan'].quantity>0).sum()),download_failed_count=int(log.ticker.isin(universe.ticker).mul(log.status.ne('ok')).sum()),
         ranking=ranking,selection_solver_optimal=bool(chosen.selection_solver_optimal.all()),
         min_mean_liquidity_brl=min_liquidity,max_assets=max_assets,group_limit_column=group_column,
+        fundamental_rule=('Score relativo de 5 componentes, pesos iguais e cobertura mínima 3/5'
+                          if ranking=='fundamental' else 'Não aplicado'),
         caveat='Seleção por ranking seguida de otimização de pesos; não certifica ótimo global entre todas as combinações de ações')
     return result
