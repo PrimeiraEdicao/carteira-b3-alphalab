@@ -37,30 +37,82 @@ st.set_page_config(
 
 
 def apply_brand() -> None:
+    css_path = ROOT / "assets" / "app.css"
+    st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+
+
+def render_journey(catalog_ready: bool, portfolio_ready: bool) -> None:
+    active_step = 3 if portfolio_ready else 2 if catalog_ready else 1
+    steps = (
+        (1, "Universo", "Atualize o catálogo público"),
+        (2, "Estratégia", "Defina escopo e premissas"),
+        (3, "Carteira", "Revise alocação e risco"),
+    )
+    cards = []
+    for number, title, description in steps:
+        state = "done" if number < active_step else "active" if number == active_step else ""
+        cards.append(
+            f'<div class="journey-step {state}" data-step="{number:02d}">'
+            f"<strong>{title}</strong><span>{description}</span></div>"
+        )
+    st.markdown(f'<nav class="journey" aria-label="Etapas da análise">{"".join(cards)}</nav>', unsafe_allow_html=True)
+
+
+def render_hero() -> None:
     st.markdown(
         """
-        <style>
-        :root { --navy:#0F2D5B; --blue:#315FC3; --accent:#4F8CFF;
-                --light:#F6F8FC; --muted:#52647E; --line:#E0E7F1; }
-        .stApp { color:var(--navy); }
-        [data-testid="stSidebar"] { background:var(--light); border-right:1px solid var(--line); }
-        h1,h2,h3 { color:var(--navy); letter-spacing:-0.02em; }
-        .hero { background:linear-gradient(135deg,#F6F8FC 0%,#EDF3FF 100%);
-                border:1px solid var(--line); border-radius:24px 64px 24px 24px;
-                padding:2.2rem 2.4rem; margin-bottom:1.2rem; }
-        .hero-kicker { color:var(--blue); font-size:.72rem; font-weight:700;
-                       letter-spacing:.16em; text-transform:uppercase; }
-        .hero h1 { margin:.5rem 0 .55rem; font-size:clamp(2rem,4vw,3.7rem); font-weight:450; }
-        .hero p { color:var(--muted); max-width:72ch; margin:0; }
-        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line);
-                                      border-top:3px solid var(--accent); border-radius:14px;
-                                      padding:1rem; }
-        .note { color:var(--muted); font-size:.86rem; }
-        .risk { background:#0F2D5B; color:#D2DCEC; padding:1rem 1.2rem;
-                border-radius:12px; font-size:.82rem; line-height:1.55; }
-        .stButton > button[kind="primary"] { border-radius:8px; font-weight:700; }
-        </style>
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="hero-kicker">CARTEIRA B3 · ALPHALAB</div>
+            <h1>Escolha. Otimize. Entenda.</h1>
+            <p>Transforme dados públicos da B3 em uma carteira executável, com critérios explícitos,
+            risco mensurável e cada decisão disponível para auditoria.</p>
+            <div class="hero-badges" aria-label="Características">
+              <span class="hero-badge">Dados públicos</span>
+              <span class="hero-badge">24 meses comuns</span>
+              <span class="hero-badge">Sem envio de ordens</span>
+            </div>
+          </div>
+          <aside class="hero-panel" aria-label="Fluxo de análise">
+            <div class="hero-panel-label"><span>ROTA DA CARTEIRA</span><span>3 etapas</span></div>
+            <div class="hero-route"><span class="hero-route-index">01</span><strong>Explore a B3</strong>
+              <small>Filtre ações e units por setor, segmento, cobertura e liquidez.</small></div>
+            <div class="hero-route"><span class="hero-route-index">02</span><strong>Calcule os pesos</strong>
+              <small>Use variância mínima ou Sharpe estimado com limites controlados.</small></div>
+            <div class="hero-route"><span class="hero-route-index">03</span><strong>Veja o porquê</strong>
+              <small>Inspecione retorno, risco, regressões, exclusões e quantidades.</small></div>
+          </aside>
+        </section>
+        <section class="principles" aria-label="Princípios do aplicativo">
+          <div class="principle"><strong>Clareza primeiro</strong><span>Premissas visíveis e resultados em linguagem direta.</span></div>
+          <div class="principle"><strong>Risco no centro</strong><span>Covariância, volatilidade e contribuição de cada ativo.</span></div>
+          <div class="principle"><strong>Pesquisa, não promessa</strong><span>Nenhum resultado garante desempenho futuro ou envia ordens.</span></div>
+        </section>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_heading(kicker: str, title: str, description: str) -> None:
+    st.markdown(
+        f"""
+        <div class="section-head">
+          <div><div class="section-kicker">{kicker}</div><h2>{title}</h2></div>
+          <p>{description}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_progress(active_step: int) -> None:
+    labels = ("Atualizar universo", "Configurar estratégia", "Analisar carteira")
+    rows = []
+    for number, label in enumerate(labels, start=1):
+        state = "active" if number == active_step else ""
+        rows.append(f'<div class="sidebar-step {state}"><b>{number}</b><span>{label}</span></div>')
+    st.markdown(
+        f'<div class="sidebar-progress" aria-label="Fluxo do aplicativo">{"".join(rows)}</div>',
         unsafe_allow_html=True,
     )
 
@@ -85,15 +137,17 @@ def money(value: float) -> str:
 
 
 apply_brand()
+catalog, catalog_meta = load_catalog()
+sidebar_step = 3 if st.session_state.get("portfolio_result") is not None else 2 if catalog is not None else 1
 
 with st.sidebar:
     logo = ROOT / "assets" / "alphalab-logo.svg"
     if logo.exists():
         st.image(str(logo), width=210)
     st.caption("PESQUISA · ALOCAÇÃO · TRANSPARÊNCIA")
+    render_sidebar_progress(sidebar_step)
     st.divider()
     st.subheader("1. Universo de ativos")
-    catalog, catalog_meta = load_catalog()
     if st.button("Atualizar catálogo público", use_container_width=True):
         with st.status("Consultando o catálogo público…", expanded=True) as status:
             try:
@@ -111,20 +165,15 @@ with st.sidebar:
         )
 
 st.markdown(
-    """
-    <section class="hero">
-      <div class="hero-kicker">CARTEIRA B3 · ALPHALAB</div>
-      <h1>Da busca pública à carteira executável.</h1>
-      <p>Descobre ações e units, aplica filtros de cobertura e liquidez, estima os pesos e
-      converte a solução em quantidades inteiras compatíveis com o capital informado.</p>
-    </section>
-    """,
+    '<div class="trust-rail"><span class="trust-dot"></span>'
+    "Pesquisa quantitativa com dados rastreáveis e decisões revisáveis</div>",
     unsafe_allow_html=True,
 )
-
-st.caption("O aplicativo é uma ferramenta de pesquisa. Ele não envia ordens e não constitui recomendação de investimento.")
+render_journey(catalog is not None, st.session_state.get("portfolio_result") is not None)
+render_hero()
 
 if catalog is None:
+    st.info("Comece atualizando o catálogo público no painel lateral.")
     st.stop()
 
 all_sectors = sorted(catalog["sector_pt"].dropna().unique())
@@ -297,7 +346,11 @@ folder_value = st.session_state.get("portfolio_folder")
 if result is not None and folder_value:
     folder = Path(folder_value)
     summary = result["summary"]
-    st.subheader("Carteira calculada")
+    render_section_heading(
+        "RESULTADO",
+        "Carteira calculada",
+        "Do peso teórico à compra inteira, com a trilha de seleção e o risco abertos para revisão.",
+    )
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Capital", money(summary["capital"]))
     c2.metric("Investido", money(summary["invested"]))
@@ -365,6 +418,11 @@ if result is not None and folder_value:
                                    if c in result["eligible"]]
             st.dataframe(result["eligible"][fundamental_columns], use_container_width=True, hide_index=True)
 
+    render_section_heading(
+        "TRANSPARÊNCIA",
+        "Como os números são construídos",
+        "As métricas reproduzem a estrutura da planilha e tornam explícitas as extensões metodológicas.",
+    )
     with st.expander("Metodologia das métricas"):
         st.markdown(
             """
