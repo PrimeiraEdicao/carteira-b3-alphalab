@@ -7,6 +7,9 @@ inteiras compatíveis com o capital informado.
 O projeto deriva do notebook `Carteira_B3_Automatica_V2(1).ipynb`, agora separado em motor,
 interface, testes e notebook revisável. A identidade visual segue o kit AlphaLab usado nos demais
 projetos: azul-marinho `#0F2D5B`, azul `#315FC3`, destaque `#4F8CFF` e fundo `#F6F8FC`.
+A interface organiza o fluxo como uma jornada de três etapas — universo, estratégia e carteira —
+com tipografia de alto contraste, botões em cápsula, cartões amplos e estados visuais explícitos.
+Os estilos ficam centralizados em `assets/app.css`; nenhuma regra quantitativa depende da camada visual.
 
 ## O que o projeto faz
 
