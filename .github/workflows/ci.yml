@@ -22,6 +22,6 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q app.py src scripts tests
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
       - name: Validate notebook JSON
         run: python -m json.tool notebooks/Carteira_B3_Automatica_V2.ipynb >/dev/null
