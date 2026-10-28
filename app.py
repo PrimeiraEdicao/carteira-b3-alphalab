@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.cvm_fundamentals import update_cvm_fundamentals
 from src.engine import (
     fundamental_ratios,
     fundamental_score,
@@ -82,6 +83,14 @@ def result_zip(folder: Path) -> bytes:
 
 def money(value: float) -> str:
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def percent(value: float | None) -> str:
+    return "—" if value is None or pd.isna(value) else f"{100 * value:.1f}%".replace(".", ",")
+
+
+def multiple(value: float | None) -> str:
+    return "—" if value is None or pd.isna(value) else f"{value:.2f}x".replace(".", ",")
 
 
 apply_brand()
@@ -156,9 +165,11 @@ with st.sidebar:
     with st.expander("Premissas avançadas"):
         ranking = st.selectbox(
             "Seleção automática",
-            ["liquidity", "sharpe", "volatility", "fundamental"],
+            ["liquidity", "sharpe", "volatility", "cvm_policy", "fundamental"],
             format_func={"liquidity": "Maior liquidez", "sharpe": "Maior Sharpe histórico",
-                         "volatility": "Menor volatilidade", "fundamental": "Qualidade fundamentalista"}.get,
+                         "volatility": "Menor volatilidade",
+                         "cvm_policy": "Qualidade + tendência — CVM (experimental)",
+                         "fundamental": "Qualidade fundamentalista — legado"}.get,
         )
         default_pool = min(60, max(20, 3 * max_assets))
         fundamental_pool_size = st.slider(
@@ -166,10 +177,15 @@ with st.sidebar:
             min_value=max_assets,
             max_value=60,
             value=max(max_assets, default_pool),
-            disabled=ranking != "fundamental",
+            disabled=ranking not in {"fundamental", "cvm_policy"},
             help="Pré-seleção por liquidez antes da consulta das demonstrações anuais.",
         )
-        if ranking == "fundamental":
+        if ranking == "cvm_policy":
+            st.caption(
+                "Challenger setorial: rentabilidade 40%, tendência 30% e resiliência 30%. "
+                "Usa DFP consolidada da CVM e não altera o modo padrão do aplicativo."
+            )
+        elif ranking == "fundamental":
             st.caption("Score relativo: ROE, ROA-EBIT, Ki, estabilidade do GAF e do GAO; 20% cada e cobertura mínima 3/5.")
         objective = st.selectbox(
             "Otimização dos pesos",
@@ -241,6 +257,7 @@ if run:
                 "A fonte aplicou limite de consultas. O histórico foi preservado; aguarde e execute novamente para retomar."
             )
         scores = None
+        cvm_bundle = None
         if ranking == "fundamental":
             progress.progress(0.95, text="Definindo o pool fundamentalista por liquidez…")
             preliminary, _, _ = screen_assets(
@@ -260,6 +277,24 @@ if run:
             scores = fundamental_score(ratios, pool["ticker"].tolist(), min_components=3)
             save_csv(scores, destination / "scores_fundamentalistas.csv")
             save_csv(fundamental_errors, destination / "diagnostico_fundamentos.csv")
+        elif ranking == "cvm_policy":
+            progress.progress(0.95, text="Definindo o pool CVM por liquidez…")
+            preliminary, _, _ = screen_assets(
+                history, scope, logs, window, min_liquidity,
+                allow_partial=allow_partial, one_per_prefix=one_per_prefix,
+                capital=capital, lot=lot, max_asset=max_asset,
+                ranking="liquidity", rf_annual=rf_annual,
+            )
+            pool = preliminary.head(fundamental_pool_size)
+            if pool.empty:
+                raise ValueError("Nenhum ativo elegível para a política CVM")
+            cvm_universe = scope[scope.ticker.isin(pool.ticker)].copy()
+            progress.progress(0.97, text=f"Lendo DFPs da CVM para {len(cvm_universe)} candidatos…")
+            cvm_bundle = update_cvm_fundamentals(DATA_DIR / "cvm", cvm_universe)
+            scores = cvm_bundle["scores"]
+            save_csv(scores, destination / "scores_politica_cvm.csv")
+            save_csv(cvm_bundle["mapping"], destination / "mapeamento_cvm.csv")
+            save_csv(cvm_bundle["diagnostics"], destination / "diagnostico_cvm.csv")
         result = run_b3(
             history,
             scope,
@@ -283,6 +318,27 @@ if run:
             diagnostic_folder=destination,
             fundamental_scores=scores,
         )
+        # O painel descritivo é independente da política escolhida. Uma falha da
+        # CVM não invalida a carteira de mercado, mas bloqueia o ranking CVM.
+        try:
+            if cvm_bundle is None:
+                chosen_tickers = result["selected"]["ticker"].tolist()
+                cvm_universe = scope[scope.ticker.isin(chosen_tickers)].copy()
+                cvm_bundle = update_cvm_fundamentals(DATA_DIR / "cvm", cvm_universe)
+            result["cvm_indicators"] = cvm_bundle["indicators"]
+            result["cvm_scores"] = cvm_bundle["scores"]
+            result["cvm_mapping"] = cvm_bundle["mapping"]
+            result["cvm_diagnostics"] = cvm_bundle["diagnostics"]
+            save_csv(cvm_bundle["indicators"], destination / "indicadores_cvm.csv")
+            save_csv(cvm_bundle["scores"], destination / "scores_politica_cvm.csv")
+            save_csv(cvm_bundle["mapping"], destination / "mapeamento_cvm.csv")
+        except Exception as cvm_exc:
+            if ranking == "cvm_policy":
+                raise
+            result["cvm_error"] = str(cvm_exc)
+            result["cvm_indicators"] = pd.DataFrame()
+            result["cvm_scores"] = pd.DataFrame()
+            result["cvm_mapping"] = pd.DataFrame()
         save_result(result, destination)
         save_csv(result["selected"], destination / "ativos_selecionados.csv")
         st.session_state["portfolio_result"] = result
@@ -304,16 +360,24 @@ if result is not None and folder_value:
     c3.metric("Caixa", money(summary["cash"]))
     c4.metric("Ativos comprados", int(summary["bought_count"]))
 
-    tab1, tab2, tab3 = st.tabs(["Plano de compra", "Risco e retorno", "Auditoria da seleção"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Plano de compra", "Risco e retorno", "Auditoria da seleção", "Fundamentos CVM"]
+    )
     with tab1:
         plan = result["plan"].copy()
         plan["peso_teorico_%"] = plan["target_weight"] * 100
         plan["peso_efetivo_%"] = plan["actual_weight_capital"] * 100
-        st.dataframe(
+        plan_event = st.dataframe(
             plan[["ticker", "segment", "reference_price", "quantity", "invested", "peso_teorico_%", "peso_efetivo_%"]],
             use_container_width=True,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="portfolio_plan_table",
         )
+        if plan_event.selection.rows:
+            st.session_state["selected_portfolio_ticker"] = plan.iloc[plan_event.selection.rows[0]]["ticker"]
+            st.caption("Ativo selecionado. Abra a aba **Fundamentos CVM** para ver a análise do negócio.")
         st.bar_chart(plan.set_index("ticker")[["peso_teorico_%", "peso_efetivo_%"]])
     with tab2:
         left, center, right = st.columns(3)
@@ -364,6 +428,116 @@ if result is not None and folder_value:
                                                 "ki_effective", "fundamental_coverage", "fundamental_score"]
                                    if c in result["eligible"]]
             st.dataframe(result["eligible"][fundamental_columns], use_container_width=True, hide_index=True)
+        elif summary["ranking"] == "cvm_policy":
+            st.info("A política CVM é um challenger experimental; o baseline permanece inalterado.")
+            cvm_columns = [c for c in ["ticker", "period", "available_at", "company_name",
+                                       "cvm_profitability", "cvm_trend", "cvm_resilience",
+                                       "cvm_policy_coverage", "cvm_policy_score"]
+                           if c in result["eligible"]]
+            st.dataframe(result["eligible"][cvm_columns], use_container_width=True, hide_index=True)
+
+    with tab4:
+        bought = plan.loc[plan.quantity.gt(0), "ticker"].tolist()
+        options = bought or plan["ticker"].tolist()
+        current = st.session_state.get("selected_portfolio_ticker")
+        if current not in options:
+            current = options[0]
+        ticker = st.selectbox(
+            "Ação da carteira",
+            options,
+            index=options.index(current),
+            help="Você também pode selecionar uma linha na aba Plano de compra.",
+        )
+        st.session_state["selected_portfolio_ticker"] = ticker
+        indicators = result.get("cvm_indicators", pd.DataFrame())
+        mapping = result.get("cvm_mapping", pd.DataFrame())
+        scores_cvm = result.get("cvm_scores", pd.DataFrame())
+        asset_history = indicators[indicators.ticker.eq(ticker)].sort_values("period") if not indicators.empty else pd.DataFrame()
+        if asset_history.empty or asset_history["period"].isna().all():
+            reason = result.get("cvm_error", "Não houve correspondência segura entre o ticker e a companhia na CVM.")
+            st.warning(f"Indicadores CVM indisponíveis para {ticker}. {reason}")
+            if not mapping.empty and ticker in set(mapping.ticker):
+                st.dataframe(mapping[mapping.ticker.eq(ticker)], use_container_width=True, hide_index=True)
+        else:
+            latest = asset_history.iloc[-1]
+            company_value = latest.get("company_name")
+            company = ticker if pd.isna(company_value) else str(company_value)
+            match = mapping[mapping.ticker.eq(ticker)].tail(1) if not mapping.empty else pd.DataFrame()
+            confidence = match.match_score.iloc[0] if not match.empty else float("nan")
+            st.markdown(f"### {company}")
+            st.caption(
+                f"{ticker} · exercício {pd.Timestamp(latest.period).year} · CD_CVM {latest.get('cd_cvm', '—')} · "
+                f"confiança do vínculo {percent(confidence)}"
+            )
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("ROE", percent(latest.get("roe")))
+            m2.metric("Margem EBIT", percent(latest.get("ebit_margin")))
+            m3.metric("Receita YoY", percent(latest.get("revenue_growth_yoy")))
+            m4.metric("Dívida / ativos", percent(latest.get("debt_assets")))
+            m5.metric("Liquidez corrente", multiple(latest.get("current_ratio")))
+            score_row = scores_cvm[scores_cvm.ticker.eq(ticker)].tail(1) if not scores_cvm.empty else pd.DataFrame()
+            if not score_row.empty and pd.notna(score_row.iloc[0].get("cvm_policy_score")):
+                score_value = float(score_row.iloc[0]["cvm_policy_score"])
+                st.info(
+                    f"Score challenger CVM: **{score_value:.1f}/100** · "
+                    f"rentabilidade {100 * score_row.iloc[0]['cvm_profitability']:.0f} · "
+                    f"tendência {100 * score_row.iloc[0]['cvm_trend']:.0f} · "
+                    f"resiliência {100 * score_row.iloc[0]['cvm_resilience']:.0f}."
+                )
+
+            st.markdown("#### Análise horizontal")
+            horizontal = asset_history[[
+                "period", "revenue", "revenue_growth_yoy", "ebit", "ebit_growth_yoy",
+                "net_income", "net_income_growth_yoy", "operating_cash_flow",
+            ]].copy()
+            horizontal["period"] = pd.to_datetime(horizontal.period).dt.year
+            horizontal[["revenue", "ebit", "net_income", "operating_cash_flow"]] /= 1_000_000
+            horizontal[["revenue_growth_yoy", "ebit_growth_yoy", "net_income_growth_yoy"]] *= 100
+            horizontal = horizontal.rename(columns={
+                "period": "ano", "revenue": "receita_R$mi", "revenue_growth_yoy": "receita_YoY",
+                "ebit": "EBIT_R$mi", "ebit_growth_yoy": "EBIT_YoY",
+                "net_income": "lucro_R$mi", "net_income_growth_yoy": "lucro_YoY",
+                "operating_cash_flow": "FCO_R$mi",
+            })
+            st.dataframe(
+                horizontal,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "receita_YoY": st.column_config.NumberColumn(format="%.1f%%"),
+                    "EBIT_YoY": st.column_config.NumberColumn(format="%.1f%%"),
+                    "lucro_YoY": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+            chart = asset_history.set_index("period")[["revenue", "ebit", "net_income"]] / 1_000_000
+            chart = chart.rename(columns={"revenue": "Receita", "ebit": "EBIT", "net_income": "Lucro"})
+            st.line_chart(chart, y=list(chart.columns), y_label="R$ milhões")
+
+            st.markdown("#### Análise vertical e estrutura financeira")
+            vertical_columns = [
+                "period", "cash_assets", "receivables_assets", "inventory_assets", "debt_assets",
+                "equity_assets", "short_debt_share", "gross_margin", "ebit_margin", "net_margin",
+                "current_ratio", "net_debt_ebit", "cfo_net_income",
+            ]
+            vertical = asset_history[[column for column in vertical_columns if column in asset_history]].tail(5).copy()
+            vertical["period"] = pd.to_datetime(vertical.period).dt.year
+            vertical = vertical.rename(columns={
+                "period": "ano", "cash_assets": "caixa/ativos", "receivables_assets": "recebíveis/ativos",
+                "inventory_assets": "estoques/ativos", "debt_assets": "dívida/ativos",
+                "equity_assets": "PL/ativos", "short_debt_share": "dívida_CP/dívida",
+                "gross_margin": "margem_bruta", "ebit_margin": "margem_EBIT",
+                "net_margin": "margem_líquida", "current_ratio": "liquidez_corrente",
+                "net_debt_ebit": "dívida_líquida/EBIT", "cfo_net_income": "FCO/lucro",
+            })
+            st.dataframe(vertical, use_container_width=True, hide_index=True)
+            received = latest.get("available_at")
+            received_text = "não informado" if pd.isna(received) else pd.Timestamp(received).strftime("%d/%m/%Y")
+            st.caption(
+                f"Fonte: DFP consolidada estruturada da CVM · recebida em {received_text}. "
+                "Ausências permanecem vazias e não são convertidas em zero."
+            )
+            if "Financeiro" in str(latest.get("sector_pt", "")):
+                st.caption("Instituição financeira: endividamento e liquidez corrente não têm a mesma interpretação de uma empresa não financeira.")
 
     with st.expander("Metodologia das métricas"):
         st.markdown(
@@ -376,6 +550,11 @@ if result is not None and folder_value:
             **Fundamentos:** percentis transversais com pesos iguais para ROE, ROA-EBIT, menor Ki,
             GAF próximo de 1 e GAO próximo de 1. O cálculo exige ao menos três componentes e usa Ki
             revisado quando disponível; caso contrário, usa despesa de juros/dívida total como proxy.
+
+            **CVM:** análise anual consolidada com contas fixas da DFP. O challenger combina
+            rentabilidade (40%), tendência horizontal (30%) e resiliência/estrutura vertical (30%),
+            com percentis setoriais e cobertura mínima. A data de recebimento é preservada para um
+            futuro backtest point-in-time; o score não é validação de desempenho.
             """
         )
 
@@ -395,3 +574,4 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
