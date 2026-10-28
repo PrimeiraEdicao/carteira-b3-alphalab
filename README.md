@@ -19,6 +19,10 @@ projetos: azul-marinho `#0F2D5B`, azul `#315FC3`, destaque `#4F8CFF` e fundo `#F
 - otimiza pesos por variância mínima ou Sharpe estimado;
 - expõe alpha, beta, R², significância, Sharpe e contribuição de cada ativo ao risco;
 - oferece ranking fundamentalista opcional por ROE, ROA-EBIT, Ki, GAF e GAO;
+- baixa DFPs consolidadas estruturadas da CVM e preserva a data de recebimento;
+- calcula análise horizontal e vertical, margens, rentabilidade, solvência e qualidade do lucro;
+- permite selecionar uma linha da carteira e abrir o histórico fundamental da companhia;
+- oferece uma política challenger CVM, setorial e opcional, sem alterar o ranking padrão;
 - converte pesos em quantidades inteiras, respeitando capital e limites por ativo/grupo;
 - salva configuração, diagnósticos, triagem, carteira, estatísticas e resumo da execução.
 
@@ -41,6 +45,13 @@ O ranking padrão continua sendo **maior liquidez**. O ranking **qualidade funda
 forma um pool configurável de ativos líquidos e então calcula um score transversal com pesos iguais
 para ROE, ROA-EBIT, menor Ki, GAF próximo de 1 e GAO próximo de 1. São exigidos ao menos três dos
 cinco componentes. O score é relativo ao pool e não é uma previsão de retorno.
+
+O ranking **Qualidade + tendência — CVM** é experimental. Ele pré-seleciona um pool líquido e
+combina três pilares normalizados por setor: rentabilidade (40%), tendência anual (30%) e
+resiliência/estrutura patrimonial (30%). Companhias financeiras usam um conjunto próprio de
+componentes. O painel de fundamentos permanece disponível mesmo quando esse ranking não participa
+da seleção: depois de montar a carteira, selecione uma linha em **Plano de compra** e abra
+**Fundamentos CVM**.
 
 ## Usar no Colab
 
@@ -65,6 +76,7 @@ de rede, alinhamento mensal estrito, limites da otimização e viabilidade da se
 ├── app.py                         # interface Streamlit
 ├── src/
 │   ├── engine.py                  # retornos, modelo, pesos e compra inteira
+│   ├── cvm_fundamentals.py        # DFP, vínculo de companhia, AH/AV e score challenger
 │   └── universe_b3.py             # catálogo, coleta, triagem e seleção
 ├── notebooks/                     # Colab sem outputs e sem motor duplicado
 ├── tests/                         # testes offline
@@ -89,8 +101,11 @@ oficiais da B3. Dados públicos podem conter atraso, omissões e revisões. A se
 da otimização de pesos não certifica o ótimo global entre todas as combinações nem prevê retorno
 futuro. Este software não envia ordens e não constitui recomendação de investimento.
 
-As demonstrações anuais públicas não carregam, neste fluxo, a data histórica de publicação. Assim,
-o ranking fundamentalista pode ser usado na fotografia corrente, mas não deve ser tratado como
-backtest causal sem adicionar o campo de disponibilidade de cada demonstração.
+O fluxo CVM preserva `DT_RECEB` como `available_at`, mas esta versão ainda não executa um backtest
+point-in-time da política challenger. O score pode ser usado como fotografia atual e hipótese de
+pesquisa; não deve ser tratado como evidência de superioridade futura. O vínculo ticker–companhia
+falha fechado quando a correspondência não atinge a confiança mínima e pode ser revisado em
+`data/cvm/mapeamento_manual.csv` com as colunas `ticker,cd_cvm`.
 
 Não há licença de reutilização concedida neste repositório público.
+

@@ -225,27 +225,35 @@ def run_b3(history,universe,log,capital,window=24,min_liquidity=1e6,max_assets=1
            allow_partial=True,objective='min_variance',rf_annual=.10,market_scenario=None,
            lot=1,fee_rate=0.,fixed_fee=0.,asof=None,simulations=10000,group_column='segment',
            diagnostic_folder=None,fundamental_scores=None):
-    market_ranking='liquidity' if ranking=='fundamental' else ranking
+    market_ranking='liquidity' if ranking in {'fundamental','cvm_policy'} else ranking
     elig,report,_=screen_assets(history,universe,log,window,min_liquidity,
          allow_partial=allow_partial,one_per_prefix=one_per_prefix,capital=capital,
          lot=lot,max_asset=max_asset,asof=asof,ranking=market_ranking,rf_annual=rf_annual)
-    if ranking=='fundamental':
+    if ranking in {'fundamental','cvm_policy'}:
         if fundamental_scores is None or fundamental_scores.empty:
             raise ValueError('Ranking fundamentalista requer fundamentos do pool de candidatos')
-        fields=['ticker','period','roe','roa_ebit','gaf','gao','ki_effective',
-                'fundamental_coverage','fundamental_score']
+        if ranking == 'cvm_policy':
+            score_column='cvm_policy_score';coverage_column='cvm_policy_coverage'
+            fields=['ticker','period','available_at','company_name','cd_cvm','cvm_profitability',
+                    'cvm_trend','cvm_resilience','cvm_policy_type',coverage_column,score_column]
+            minimum='cobertura/pilares mínimos da política CVM'
+        else:
+            score_column='fundamental_score';coverage_column='fundamental_coverage'
+            fields=['ticker','period','roe','roa_ebit','gaf','gao','ki_effective',
+                    coverage_column,score_column]
+            minimum='menos de 3 dos 5 componentes'
         available=[c for c in fields if c in fundamental_scores]
         scores=fundamental_scores[available].drop_duplicates('ticker',keep='last')
         pool=set(scores.ticker)
         elig=elig.merge(scores,on='ticker',how='left')
-        insufficient=elig.fundamental_score.isna()
+        insufficient=elig[score_column].isna()
         outside=~elig.ticker.isin(pool)
         report=report.merge(scores,on='ticker',how='left')
         report.loc[report.ticker.isin(elig.loc[insufficient & ~outside,'ticker']),'eligible']=False
-        report.loc[report.ticker.isin(elig.loc[insufficient & ~outside,'ticker']),'exclusion']='Fundamentos insuficientes: menos de 3 dos 5 componentes'
+        report.loc[report.ticker.isin(elig.loc[insufficient & ~outside,'ticker']),'exclusion']=f'Fundamentos insuficientes: {minimum}'
         report.loc[report.ticker.isin(elig.loc[outside,'ticker']),'eligible']=False
         report.loc[report.ticker.isin(elig.loc[outside,'ticker']),'exclusion']='Fora do pool fundamentalista pré-ordenado por liquidez'
-        elig=(elig.loc[~insufficient].sort_values(['fundamental_score','ticker'],ascending=[False,True])
+        elig=(elig.loc[~insufficient].sort_values([score_column,'ticker'],ascending=[False,True])
               .reset_index(drop=True))
         elig['rank']=np.arange(1,len(elig)+1)
         if elig.empty:
@@ -263,7 +271,12 @@ def run_b3(history,universe,log,capital,window=24,min_liquidity=1e6,max_assets=1
         bought_count=int((result['plan'].quantity>0).sum()),download_failed_count=int(log.ticker.isin(universe.ticker).mul(log.status.ne('ok')).sum()),
         ranking=ranking,selection_solver_optimal=bool(chosen.selection_solver_optimal.all()),
         min_mean_liquidity_brl=min_liquidity,max_assets=max_assets,group_limit_column=group_column,
-        fundamental_rule=('Score relativo de 5 componentes, pesos iguais e cobertura mínima 3/5'
-                          if ranking=='fundamental' else 'Não aplicado'),
+        fundamental_rule=(
+            'Política CVM setorial: rentabilidade 40%, tendência 30%, resiliência 30%'
+            if ranking=='cvm_policy' else
+            ('Score relativo de 5 componentes, pesos iguais e cobertura mínima 3/5'
+             if ranking=='fundamental' else 'Não aplicado')
+        ),
         caveat='Seleção por ranking seguida de otimização de pesos; não certifica ótimo global entre todas as combinações de ações')
     return result
+
